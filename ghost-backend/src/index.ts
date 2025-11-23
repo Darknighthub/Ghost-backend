@@ -12,12 +12,10 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// --- TİP TANIMLAMALARI ---
 interface AuthRequest extends Request {
     user?: any;
 }
 
-// --- YARDIMCI FONKSİYONLAR ---
 function generateFakeCardNumber() {
     const bin = "5555";
     const randomPart = Math.floor(Math.random() * 1000000000000).toString().padStart(12, '0');
@@ -40,7 +38,6 @@ function generateGhostEmail(name: string) {
     return `${cleanName}.${randomSuffix}@ghostmail.com`;
 }
 
-// --- MIDDLEWARE ---
 const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) => {
     const authHeader = req.headers.authorization;
     if (!authHeader) return res.status(401).json({ error: "Yetkisiz erişim! Token gerekli." });
@@ -54,39 +51,26 @@ const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) 
     next();
 };
 
-// --- ENDPOINTLER ---
-
 app.get('/', (req: Request, res: Response) => {
-    res.send('Ghost Protocol Backend (DEBUG MODE 🕵️) 👻');
+    res.send('Ghost Protocol Backend (Wallet Mode 👛) 👻');
 });
 
-// YENİ: ŞİFRELEME TEST DEDEKTÖRÜ
-// Render URL'sinin sonuna /debug-crypto yazarak girilecek.
 app.get('/debug-crypto', (req: Request, res: Response) => {
     try {
         const testText = "GizliMesaj123";
-        // Deneme yapalım
         const encrypted = encrypt(testText);
         const decrypted = decrypt(encrypted);
         
         res.json({
             status: "OK",
-            env_key_check: process.env.ENCRYPTION_KEY ? "Anahtar VAR (Uzunluk: " + process.env.ENCRYPTION_KEY.length + ")" : "Anahtar YOK ❌",
-            original: testText,
-            encrypted_example: encrypted,
+            env_key_check: process.env.ENCRYPTION_KEY ? "Anahtar VAR" : "Anahtar YOK ❌",
             decrypted_check: decrypted === testText ? "Şifre Çözme Başarılı ✅" : "Şifre Çözme HATALI ❌"
         });
     } catch (error: any) {
-        res.status(500).json({
-            status: "ERROR",
-            message: "Şifreleme sistemi çöktü!",
-            error_detail: error.message,
-            hint: "Render Environment Variables kısmındaki ENCRYPTION_KEY'i kontrol et."
-        });
+        res.status(500).json({ error: "Kritik Hata", detail: error.message });
     }
 });
 
-// Kayıt
 app.post('/register', async (req: Request, res: Response) => {
     const { email, password, full_name, phone } = req.body;
     const { data: authData, error: authError } = await supabase.auth.signUp({ email, password });
@@ -105,11 +89,9 @@ app.post('/register', async (req: Request, res: Response) => {
     res.json({ message: "Kayıt başarılı!", user: authData.user });
 });
 
-// Giriş
 app.post('/login', async (req: Request, res: Response) => {
     const { email, password } = req.body;
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-
     if (error) return res.status(401).json({ error: "Hatalı email veya şifre" });
 
     res.json({ 
@@ -119,7 +101,6 @@ app.post('/login', async (req: Request, res: Response) => {
     });
 });
 
-// GÜVENLİ KART YARATMA (FAIL SECURE)
 app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) => {
     const { limit, merchant } = req.body;
     const user = req.user;
@@ -131,28 +112,20 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
     const ghostEmail = generateGhostEmail(fakeName);
     const ghostPhone = "+90555" + Math.floor(Math.random() * 10000000);
 
-    // --- GÜVENLİK KONTROLÜ ---
     let encryptedCardNumber, encryptedCVV;
-    
     try {
-        // Eğer şifreleme başarısız olursa (anahtar yoksa vs.) kod burada patlayacak
-        // ve aşağıdaki catch bloğuna gidecektir. ASLA şifresiz devam etmez.
         encryptedCardNumber = encrypt(rawCardNumber);
         encryptedCVV = encrypt(rawCVV);
     } catch (e) {
-        console.error("Şifreleme Hatası:", e);
-        return res.status(500).json({ 
-            error: "KRİTİK GÜVENLİK HATASI: Şifreleme yapılamadı. İşlem iptal edildi.",
-            detail: "Sistem yöneticisi ENCRYPTION_KEY'i kontrol etmeli."
-        });
+        return res.status(500).json({ error: "Şifreleme hatası" });
     }
 
     const { data, error } = await supabase
         .from('virtual_cards')
         .insert({
             user_id: user.id,
-            card_number: encryptedCardNumber, // Şifreli
-            cvv: encryptedCVV,               // Şifreli
+            card_number: encryptedCardNumber,
+            cvv: encryptedCVV,
             expiry_date: expiry,
             spending_limit: limit,
             merchant_lock: merchant,
@@ -164,18 +137,39 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
     if (error) return res.status(500).json({ error: error.message });
 
     res.status(201).json({
-        message: "Hayalet Kimlik Hazır (Güvenli) 👻",
-        card: {
-            ...data,
-            card_number: rawCardNumber, // Kullanıcıya düz halini göster
-            cvv: rawCVV
-        },
-        identity: {
-            full_name: fakeName,
-            email: ghostEmail,
-            phone: ghostPhone
+        message: "Kart Oluşturuldu",
+        card: { ...data, card_number: rawCardNumber, cvv: rawCVV },
+        identity: { full_name: fakeName, email: ghostEmail, phone: ghostPhone }
+    });
+});
+
+// --- YENİ: ESKİ KARTLARI GETİR (CÜZDAN) ---
+app.get('/my-cards', requireAuth, async (req: AuthRequest, res: Response) => {
+    const user = req.user;
+
+    // 1. Kullanıcının tüm kartlarını çek
+    const { data, error } = await supabase
+        .from('virtual_cards')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false }); // En yeni en üstte
+
+    if (error) return res.status(500).json({ error: error.message });
+
+    // 2. Kart numaralarının şifresini çözüp gönder
+    const decryptedCards = data.map(card => {
+        try {
+            return {
+                ...card,
+                card_number: decrypt(card.card_number), // Çöz
+                cvv: decrypt(card.cvv)                 // Çöz
+            };
+        } catch (e) {
+            return { ...card, card_number: "**** HATA ****", cvv: "***" };
         }
     });
+
+    res.json({ cards: decryptedCards });
 });
 
 app.listen(port, () => {
