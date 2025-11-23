@@ -2,6 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { supabase } from './config/supabase';
+import { encrypt, decrypt } from './utils/crypto'; // Şifreleme modülünü dahil et
 
 dotenv.config();
 
@@ -27,14 +28,12 @@ function generateCVV() {
     return Math.floor(Math.random() * (999 - 100 + 1) + 100).toString();
 }
 
-// YENİ: Sahte İsim Üretici
 function generateFakeName() {
     const names = ["Ali", "Ayşe", "Mehmet", "Zeynep", "Can", "Elif", "Murat", "Selin"];
     const surnames = ["Yılmaz", "Kaya", "Demir", "Çelik", "Şahin", "Yıldız", "Öztürk"];
     return names[Math.floor(Math.random() * names.length)] + " " + surnames[Math.floor(Math.random() * surnames.length)];
 }
 
-// YENİ: Sahte Email Üretici
 function generateGhostEmail(name: string) {
     const cleanName = name.toLowerCase().replace(/ /g, '.').replace(/[^a-z0-9.]/g, '');
     const randomSuffix = Math.floor(Math.random() * 1000);
@@ -58,7 +57,7 @@ const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) 
 // --- ENDPOINTLER ---
 
 app.get('/', (req: Request, res: Response) => {
-    res.send('Ghost Protocol Backend (Auth + Identity) 👻');
+    res.send('Ghost Protocol Backend (SECURE MODE 🔒) 👻');
 });
 
 // KAYIT OL
@@ -69,6 +68,7 @@ app.post('/register', async (req: Request, res: Response) => {
     if (authError) return res.status(400).json({ error: authError.message });
     if (!authData.user) return res.status(400).json({ error: "Kullanıcı oluşturulamadı" });
 
+    // Kişisel verileri de şifreleyebiliriz ama şimdilik telefon kalsın
     await supabase.from('users').insert({
         id: authData.user.id,
         email: email,
@@ -94,25 +94,40 @@ app.post('/login', async (req: Request, res: Response) => {
     });
 });
 
-// KART VE KİMLİK YARAT
+// KART VE KİMLİK YARAT (ŞİFRELİ VERSİYON)
 app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) => {
     const { limit, merchant } = req.body;
     const user = req.user;
 
-    // Veri Üretimi
-    const cardNumber = generateFakeCardNumber();
-    const cvv = generateCVV();
+    // 1. Verileri RAM'de (Geçici Hafıza) Üret
+    const rawCardNumber = generateFakeCardNumber();
+    const rawCVV = generateCVV();
     const expiry = "12/28";
+    
     const fakeName = generateFakeName();
     const ghostEmail = generateGhostEmail(fakeName);
     const ghostPhone = "+90555" + Math.floor(Math.random() * 10000000);
+
+    // 2. Veritabanına Kaydetmeden Önce ŞİFRELE 🔒
+    // Supabase'deki çalışanlar bile bu veriyi okuyamayacak.
+    // Eğer şifreleme anahtarı yoksa hata vermemesi için basit kontrol
+    let encryptedCardNumber = rawCardNumber;
+    let encryptedCVV = rawCVV;
+
+    try {
+        encryptedCardNumber = encrypt(rawCardNumber);
+        encryptedCVV = encrypt(rawCVV);
+    } catch (e) {
+        console.error("Şifreleme hatası (Muhtemelen KEY eksik):", e);
+        return res.status(500).json({ error: "Sunucu şifreleme hatası. .env dosyasını kontrol et." });
+    }
 
     const { data, error } = await supabase
         .from('virtual_cards')
         .insert({
             user_id: user.id,
-            card_number: cardNumber,
-            cvv: cvv,
+            card_number: encryptedCardNumber, // Şifreli hali kaydet
+            cvv: encryptedCVV,               // Şifreli hali kaydet
             expiry_date: expiry,
             spending_limit: limit,
             merchant_lock: merchant,
@@ -121,12 +136,20 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
         .select()
         .single();
 
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) {
+        console.error("DB Error:", error);
+        return res.status(500).json({ error: error.message });
+    }
 
-    // Cevap
+    // 3. Kullanıcıya Dönerken ŞİFRESİZ Hali Gönder
+    // (Çünkü kullanıcı o an kartı kullanmak istiyor)
     res.status(201).json({
-        message: "Hayalet Kimlik Hazır! 👻",
-        card: data,
+        message: "Hayalet Kimlik Hazır (Güvenli)! 👻",
+        card: {
+            ...data,
+            card_number: rawCardNumber, // Kullanıcıya gerçeğini göster
+            cvv: rawCVV                // Kullanıcıya gerçeğini göster
+        },
         identity: {
             full_name: fakeName,
             email: ghostEmail,
