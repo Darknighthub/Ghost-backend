@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ghost Protocol</title>
+    <link rel="stylesheet" href="popup.css">
+    <style>
+        /* Ekstra güvenlik için gizleme sınıfı */
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <div class="header">
+            <h1>Ghost Protocol 👻</h1>
+            <p>Dijital Kalkan</p>
+        </div>
+
+        <!-- GİRİŞ EKRANI -->
+        <div id="login-screen">
+            <input type="email" id="email" placeholder="E-posta Adresi">
+            <input type="password" id="password" placeholder="Şifre">
+            <button id="login-btn">Giriş Yap</button>
+            <p id="status-msg"></p>
+        </div>
+
+        <!-- KART EKRANI -->
+        <div id="dashboard-screen" class="hidden">
+            <div class="card-preview">
+                <h3>Sanal Kart</h3>
+                <div class="card-number">**** **** **** ****</div>
+                
+                <!-- İŞTE AYRIM BURADA: İKİ FARKLI BUTON -->
+                <button id="create-card-btn">Yeni Kart Oluştur</button>
+                <button id="fill-btn" class="hidden" style="background-color: white; color: black; border: 2px solid #00ff9d;">Formu Doldur 🪄</button>
+            
+            </div>
+            <button id="logout-btn" class="secondary-btn">Çıkış Yap</button>
+        </div>
+    </div>
+
+    <script src="popup.js"></script>
+</body>
+</html>
