@@ -2,7 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { supabase } from './config/supabase';
-import { encrypt, decrypt } from './utils/crypto'; // Şifreleme modülünü dahil et
+import { encrypt, decrypt } from './utils/crypto';
 
 dotenv.config();
 
@@ -57,10 +57,36 @@ const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) 
 // --- ENDPOINTLER ---
 
 app.get('/', (req: Request, res: Response) => {
-    res.send('Ghost Protocol Backend (SECURE MODE 🔒) 👻');
+    res.send('Ghost Protocol Backend (DEBUG MODE 🕵️) 👻');
 });
 
-// KAYIT OL
+// YENİ: ŞİFRELEME TEST DEDEKTÖRÜ
+// Render URL'sinin sonuna /debug-crypto yazarak girilecek.
+app.get('/debug-crypto', (req: Request, res: Response) => {
+    try {
+        const testText = "GizliMesaj123";
+        // Deneme yapalım
+        const encrypted = encrypt(testText);
+        const decrypted = decrypt(encrypted);
+        
+        res.json({
+            status: "OK",
+            env_key_check: process.env.ENCRYPTION_KEY ? "Anahtar VAR (Uzunluk: " + process.env.ENCRYPTION_KEY.length + ")" : "Anahtar YOK ❌",
+            original: testText,
+            encrypted_example: encrypted,
+            decrypted_check: decrypted === testText ? "Şifre Çözme Başarılı ✅" : "Şifre Çözme HATALI ❌"
+        });
+    } catch (error: any) {
+        res.status(500).json({
+            status: "ERROR",
+            message: "Şifreleme sistemi çöktü!",
+            error_detail: error.message,
+            hint: "Render Environment Variables kısmındaki ENCRYPTION_KEY'i kontrol et."
+        });
+    }
+});
+
+// Kayıt
 app.post('/register', async (req: Request, res: Response) => {
     const { email, password, full_name, phone } = req.body;
     const { data: authData, error: authError } = await supabase.auth.signUp({ email, password });
@@ -68,7 +94,6 @@ app.post('/register', async (req: Request, res: Response) => {
     if (authError) return res.status(400).json({ error: authError.message });
     if (!authData.user) return res.status(400).json({ error: "Kullanıcı oluşturulamadı" });
 
-    // Kişisel verileri de şifreleyebiliriz ama şimdilik telefon kalsın
     await supabase.from('users').insert({
         id: authData.user.id,
         email: email,
@@ -80,7 +105,7 @@ app.post('/register', async (req: Request, res: Response) => {
     res.json({ message: "Kayıt başarılı!", user: authData.user });
 });
 
-// GİRİŞ YAP
+// Giriş
 app.post('/login', async (req: Request, res: Response) => {
     const { email, password } = req.body;
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
@@ -94,40 +119,40 @@ app.post('/login', async (req: Request, res: Response) => {
     });
 });
 
-// KART VE KİMLİK YARAT (ŞİFRELİ VERSİYON)
+// GÜVENLİ KART YARATMA (FAIL SECURE)
 app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) => {
     const { limit, merchant } = req.body;
     const user = req.user;
 
-    // 1. Verileri RAM'de (Geçici Hafıza) Üret
     const rawCardNumber = generateFakeCardNumber();
     const rawCVV = generateCVV();
     const expiry = "12/28";
-    
     const fakeName = generateFakeName();
     const ghostEmail = generateGhostEmail(fakeName);
     const ghostPhone = "+90555" + Math.floor(Math.random() * 10000000);
 
-    // 2. Veritabanına Kaydetmeden Önce ŞİFRELE 🔒
-    // Supabase'deki çalışanlar bile bu veriyi okuyamayacak.
-    // Eğer şifreleme anahtarı yoksa hata vermemesi için basit kontrol
-    let encryptedCardNumber = rawCardNumber;
-    let encryptedCVV = rawCVV;
-
+    // --- GÜVENLİK KONTROLÜ ---
+    let encryptedCardNumber, encryptedCVV;
+    
     try {
+        // Eğer şifreleme başarısız olursa (anahtar yoksa vs.) kod burada patlayacak
+        // ve aşağıdaki catch bloğuna gidecektir. ASLA şifresiz devam etmez.
         encryptedCardNumber = encrypt(rawCardNumber);
         encryptedCVV = encrypt(rawCVV);
     } catch (e) {
-        console.error("Şifreleme hatası (Muhtemelen KEY eksik):", e);
-        return res.status(500).json({ error: "Sunucu şifreleme hatası. .env dosyasını kontrol et." });
+        console.error("Şifreleme Hatası:", e);
+        return res.status(500).json({ 
+            error: "KRİTİK GÜVENLİK HATASI: Şifreleme yapılamadı. İşlem iptal edildi.",
+            detail: "Sistem yöneticisi ENCRYPTION_KEY'i kontrol etmeli."
+        });
     }
 
     const { data, error } = await supabase
         .from('virtual_cards')
         .insert({
             user_id: user.id,
-            card_number: encryptedCardNumber, // Şifreli hali kaydet
-            cvv: encryptedCVV,               // Şifreli hali kaydet
+            card_number: encryptedCardNumber, // Şifreli
+            cvv: encryptedCVV,               // Şifreli
             expiry_date: expiry,
             spending_limit: limit,
             merchant_lock: merchant,
@@ -136,19 +161,14 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
         .select()
         .single();
 
-    if (error) {
-        console.error("DB Error:", error);
-        return res.status(500).json({ error: error.message });
-    }
+    if (error) return res.status(500).json({ error: error.message });
 
-    // 3. Kullanıcıya Dönerken ŞİFRESİZ Hali Gönder
-    // (Çünkü kullanıcı o an kartı kullanmak istiyor)
     res.status(201).json({
-        message: "Hayalet Kimlik Hazır (Güvenli)! 👻",
+        message: "Hayalet Kimlik Hazır (Güvenli) 👻",
         card: {
             ...data,
-            card_number: rawCardNumber, // Kullanıcıya gerçeğini göster
-            cvv: rawCVV                // Kullanıcıya gerçeğini göster
+            card_number: rawCardNumber, // Kullanıcıya düz halini göster
+            cvv: rawCVV
         },
         identity: {
             full_name: fakeName,
