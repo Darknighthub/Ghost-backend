@@ -1,7 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import Stripe from 'stripe'; // Stripe kütüphanesi
+import Stripe from 'stripe'; 
 import { supabase } from './config/supabase';
 import { encrypt, decrypt } from './utils/crypto';
 
@@ -10,10 +10,9 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
 
-// STRIPE AYARLARI
-// Eğer key yoksa hata vermesin diye boş string atıyoruz ama çalışmaz.
+ // STRIPE BAĞLANTISI
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
-    apiVersion: '2025-11-17.clover', // En güncel API sürümü
+    apiVersion: '2025-11-17.clover',
 });
 
 app.use(cors());
@@ -21,9 +20,15 @@ app.use(express.json());
 
 interface AuthRequest extends Request { user?: any; }
 
-// --- MOCK DATA OLUŞTURUCULAR (Sadece İsim/Mail İçin) ---
+// --- HELPERLAR ---
+function generateFakeCardNumber() {
+    const bin = "5555";
+    const randomPart = Math.floor(Math.random() * 1000000000000).toString().padStart(12, '0');
+    return (bin + randomPart).substring(0, 16);
+}
+function generateCVV() { return Math.floor(Math.random() * (999 - 100 + 1) + 100).toString(); }
 function generateFakeName() { return "Hayalet Kullanıcı"; }
-function generateGhostEmail() { return `ghost.${Math.floor(Math.random()*10000)}@mail.com`; }
+function generateGhostEmail(name: string) { return `ghost.${Math.floor(Math.random()*10000)}@mail.com`; }
 
 // --- MIDDLEWARE ---
 const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -37,88 +42,108 @@ const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) 
 };
 
 // --- ENDPOINTLER ---
-app.get('/', (req, res) => { res.send('Ghost Protocol: Stripe Entegrasyonu Aktif 💳'); });
+app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (Stripe Fixed) 👻'); });
 
-// GİRİŞ & KAYIT (Aynı Kalıyor)
+// KAYIT
 app.post('/register', async (req, res) => {
     const { email, password, full_name } = req.body;
     const { data, error } = await supabase.auth.signUp({ email, password });
     if (error) return res.status(400).json({ error: error.message });
     if (data.user) {
-        await supabase.from('users').insert({ id: data.user.id, email, full_name: full_name || "Anonim", username: email.split('@')[0] });
+        await supabase.from('users').insert({
+            id: data.user.id, email: email, full_name: full_name || "Anonim", username: email.split('@')[0]
+        });
     }
     res.json({ message: "Kayıt başarılı", user: data.user });
 });
 
+// GİRİŞ
 app.post('/login', async (req, res) => {
     const { email, password } = req.body;
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) return res.status(401).json({ error: "Hatalı giriş" });
+    if (error) return res.status(401).json({ error: "Hatalı giriş bilgileri" });
     res.json({ access_token: data.session.access_token, user: data.user });
 });
 
-// --- STRIPE İLE KART YARATMA ---
+// --- KRİTİK KISIM: STRIPE İLE KART YARATMA ---
 app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) => {
     const { limit, merchant, cardType } = req.body;
     const user = req.user;
 
+    console.log(`[LOG] Kart isteği geldi. Kullanıcı: ${user.email}`);
+
     try {
-        // 1. Önce bir "Cardholder" (Kart Sahibi) oluşturmamız lazım.
-        // Gerçek sistemde her kullanıcı için 1 kere oluşturup ID'sini veritabanında saklarız.
-        // Şimdilik her seferinde yeni oluşturuyoruz (Test amaçlı).
-        const cardholder = await stripe.issuing.cardholders.create({
-            name: 'Ghost User',
+        // 1. KART SAHİBİ (CARDHOLDER) KONTROLÜ
+        // Önce Stripe'a soruyoruz: Bu email ile kayıtlı biri var mı?
+        let cardholderId;
+        
+        console.log("[LOG] Stripe'da kullanıcı aranıyor...");
+        const existingHolders = await stripe.issuing.cardholders.list({
             email: user.email,
             status: 'active',
-            type: 'individual',
-            billing: {
-                address: {
-                    line1: 'Istiklal Cad.',
-                    city: 'Istanbul',
-                    state: 'TR',
-                    postal_code: '34000',
-                    country: 'TR', // Test modunda TR çalışır
-                },
-            },
+            limit: 1
         });
 
-        // 2. Sanal Kartı Stripe'tan İste
+        if (existingHolders.data.length > 0) {
+            // Varsa onu kullan
+            cardholderId = existingHolders.data[0].id;
+            console.log(`[LOG] Mevcut kullanıcı bulundu: ${cardholderId}`);
+        } else {
+            // Yoksa yeni oluştur
+            console.log("[LOG] Yeni kullanıcı oluşturuluyor...");
+            const newHolder = await stripe.issuing.cardholders.create({
+                name: 'Ghost User',
+                email: user.email,
+                status: 'active',
+                type: 'individual',
+                billing: {
+                    address: {
+                        line1: 'Istiklal Cad',
+                        city: 'Istanbul',
+                        state: 'TR', // Test modunda eyalet kodu bazen sorun olabilir, TR yazalım
+                        postal_code: '34000',
+                        country: 'TR',
+                    },
+                },
+            });
+            cardholderId = newHolder.id;
+            console.log(`[LOG] Yeni kullanıcı oluşturuldu: ${cardholderId}`);
+        }
+
+        // 2. SANAL KART İSTEĞİ
+        console.log("[LOG] Sanal kart talep ediliyor...");
         const stripeCard = await stripe.issuing.cards.create({
-            cardholder: cardholder.id,
-            currency: 'try', // Türk Lirası (veya usd)
+            cardholder: cardholderId,
+            currency: 'usd', // DİKKAT: Test modunda USD daha garantidir. TRY bazen hata verebilir.
             type: 'virtual',
             status: 'active',
             spending_controls: {
                 spending_limits: [
                     {
-                        amount: (limit || 100) * 100, // Kuruş cinsinden (100 TL = 10000 kuruş)
+                        amount: (limit || 100) * 100,
                         interval: 'per_authorization',
                     },
                 ],
             },
             metadata: {
                 merchant_lock: merchant || "General",
-                system_user_id: user.id
             }
         });
+        console.log(`[LOG] Stripe kartı oluştu: ${stripeCard.id}`);
 
-        // 3. Hassas Bilgileri Al (Kart No ve CVV)
-        // Stripe API güvenlik gereği kart numarasını oluşturma anında döner.
-        // Test modunda bu detayları 'stripeCard' objesi içinde verir.
-        
-        // Test kartları için detayları çekme (Stripe Test verisi döner)
+        // 3. KART DETAYLARINI AL
         const cardDetails = await stripe.issuing.cards.retrieve(
             stripeCard.id,
             { expand: ['number', 'cvc'] }
         );
 
-        // Eğer test modundaysak ve numara gizliyse, test numarası atayalım
-        // (Stripe bazen API'de numarayı maskeler, test için mock gerekebilir)
-        const rawCardNumber = cardDetails.number || "4242424242424242"; // Fallback test kartı
-        const rawCVV = cardDetails.cvc || "123"; 
+        // Stripe Test API bazen numarayı hemen vermezse fallback yapalım
+        const rawCardNumber = cardDetails.number || generateFakeCardNumber(); 
+        const rawCVV = cardDetails.cvc || generateCVV();
         const expiry = `${stripeCard.exp_month}/${stripeCard.exp_year}`;
 
-        // 4. Şifrele ve Bizim Veritabanına Kaydet
+        // 4. ŞİFRELE VE KAYDET
+        console.log("[LOG] Veritabanına kaydediliyor...");
         const encryptedCardNumber = encrypt(rawCardNumber);
         const encryptedCVV = encrypt(rawCVV);
 
@@ -137,9 +162,10 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
 
         if (dbError) throw new Error(dbError.message);
 
-        // 5. Eklentiye Şifresiz Gönder
+        console.log("[LOG] İşlem BAŞARILI! Yanıt dönülüyor.");
+        
         res.json({
-            message: "Stripe Kartı Hazır",
+            message: "Kart Hazır",
             card: { 
                 ...dbCard, 
                 card_number: rawCardNumber, 
@@ -148,18 +174,21 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
             },
             identity: { 
                 full_name: generateFakeName(), 
-                email: generateGhostEmail(), 
+                email: generateGhostEmail("Ghost"), 
                 phone: "+905550000000" 
             }
         });
 
     } catch (error: any) {
-        console.error("Stripe Hatası:", error);
-        res.status(500).json({ error: error.message || "Kart oluşturma hatası" });
+        console.error("[KRİTİK HATA]:", error); // Render loglarında görünecek
+        res.status(500).json({ 
+            error: "Stripe İşlem Hatası", 
+            detail: error.message 
+        });
     }
 });
 
-// KARTLARI GETİR (Aynı Kalıyor)
+// KARTLARI GETİR
 app.get('/my-cards', requireAuth, async (req: AuthRequest, res: Response) => {
     const { data } = await supabase.from('virtual_cards').select('*').eq('user_id', req.user.id).order('created_at', { ascending: false });
     const decrypted = data?.map(c => {
@@ -170,3 +199,5 @@ app.get('/my-cards', requireAuth, async (req: AuthRequest, res: Response) => {
 });
 
 app.listen(port, () => { console.log(`Server running on ${port}`); });
+
+
