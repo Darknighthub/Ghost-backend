@@ -10,13 +10,21 @@ dotenv.config();
 const app = express();
 const port = process.env.PORT || 3000;
 
- // STRIPE BAĞLANTISI
+// STRIPE AYARI
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
     apiVersion: '2025-11-17.clover',
 });
 
-app.use(cors());
+// 1. CORS AYARI (Herkesi kabul et)
+app.use(cors({ origin: '*' })); 
 app.use(express.json());
+
+// 2. GLOBAL LOGLAYICI (KAPIDAKİ AJAN)
+// Bu, sunucuya gelen HER isteği ekrana yazar.
+app.use((req, res, next) => {
+    console.log(`[GELEN İSTEK] -> ${req.method} ${req.url}`);
+    next();
+});
 
 interface AuthRequest extends Request { user?: any; }
 
@@ -33,19 +41,34 @@ function generateGhostEmail(name: string) { return `ghost.${Math.floor(Math.rand
 // --- MIDDLEWARE ---
 const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) => {
     const authHeader = req.headers.authorization;
-    if (!authHeader) return res.status(401).json({ error: "Token yok" });
+    console.log("[AUTH] Token kontrol ediliyor..."); // LOG EKLENDİ
+    
+    if (!authHeader) {
+        console.log("[AUTH HATA] Token yok!");
+        return res.status(401).json({ error: "Token yok" });
+    }
+    
     const token = authHeader.split(' ')[1];
     const { data: { user }, error } = await supabase.auth.getUser(token);
-    if (error || !user) return res.status(403).json({ error: "Geçersiz token" });
+    
+    if (error || !user) {
+        console.log("[AUTH HATA] Token geçersiz:", error?.message);
+        return res.status(403).json({ error: "Geçersiz token" });
+    }
+    
+    console.log(`[AUTH BAŞARILI] Kullanıcı: ${user.email}`);
     req.user = user;
     next();
 };
 
 // --- ENDPOINTLER ---
-app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (Stripe Fixed) 👻'); });
+app.get('/', (req, res) => { 
+    console.log("[LOG] Ana sayfaya ping atıldı.");
+    res.send('Ghost Protocol vFinal (Loglu) 👻'); 
+});
 
-// KAYIT
 app.post('/register', async (req, res) => {
+    console.log("[LOG] Kayıt isteği:", req.body.email);
     const { email, password, full_name } = req.body;
     const { data, error } = await supabase.auth.signUp({ email, password });
     if (error) return res.status(400).json({ error: error.message });
@@ -57,93 +80,57 @@ app.post('/register', async (req, res) => {
     res.json({ message: "Kayıt başarılı", user: data.user });
 });
 
-// GİRİŞ
 app.post('/login', async (req, res) => {
+    console.log("[LOG] Giriş isteği:", req.body.email);
     const { email, password } = req.body;
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) return res.status(401).json({ error: "Hatalı giriş bilgileri" });
+    if (error) {
+        console.log("[LOGIN HATA]", error.message);
+        return res.status(401).json({ error: "Hatalı giriş bilgileri" });
+    }
     res.json({ access_token: data.session.access_token, user: data.user });
 });
 
-// --- KRİTİK KISIM: STRIPE İLE KART YARATMA ---
+// KART YARATMA
 app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) => {
     const { limit, merchant, cardType } = req.body;
     const user = req.user;
 
-    console.log(`[LOG] Kart isteği geldi. Kullanıcı: ${user.email}`);
+    console.log(`[İŞLEM] Kart yaratılıyor... Tip: ${cardType}, Limit: ${limit}`);
 
     try {
-        // 1. KART SAHİBİ (CARDHOLDER) KONTROLÜ
-        // Önce Stripe'a soruyoruz: Bu email ile kayıtlı biri var mı?
         let cardholderId;
-        
-        console.log("[LOG] Stripe'da kullanıcı aranıyor...");
-        const existingHolders = await stripe.issuing.cardholders.list({
-            email: user.email,
-            status: 'active',
-            limit: 1
-        });
+        const existingHolders = await stripe.issuing.cardholders.list({ email: user.email, status: 'active', limit: 1 });
 
         if (existingHolders.data.length > 0) {
-            // Varsa onu kullan
             cardholderId = existingHolders.data[0].id;
-            console.log(`[LOG] Mevcut kullanıcı bulundu: ${cardholderId}`);
         } else {
-            // Yoksa yeni oluştur
-            console.log("[LOG] Yeni kullanıcı oluşturuluyor...");
             const newHolder = await stripe.issuing.cardholders.create({
                 name: 'Ghost User',
                 email: user.email,
                 status: 'active',
                 type: 'individual',
                 billing: {
-                    address: {
-                        line1: 'Istiklal Cad',
-                        city: 'Istanbul',
-                        state: 'TR', // Test modunda eyalet kodu bazen sorun olabilir, TR yazalım
-                        postal_code: '34000',
-                        country: 'TR',
-                    },
+                    address: { line1: 'Istiklal Cad', city: 'Istanbul', state: 'TR', postal_code: '34000', country: 'TR' },
                 },
             });
             cardholderId = newHolder.id;
-            console.log(`[LOG] Yeni kullanıcı oluşturuldu: ${cardholderId}`);
         }
 
-        // 2. SANAL KART İSTEĞİ
-        console.log("[LOG] Sanal kart talep ediliyor...");
         const stripeCard = await stripe.issuing.cards.create({
             cardholder: cardholderId,
-            currency: 'usd', // DİKKAT: Test modunda USD daha garantidir. TRY bazen hata verebilir.
+            currency: 'usd',
             type: 'virtual',
             status: 'active',
-            spending_controls: {
-                spending_limits: [
-                    {
-                        amount: (limit || 100) * 100,
-                        interval: 'per_authorization',
-                    },
-                ],
-            },
-            metadata: {
-                merchant_lock: merchant || "General",
-            }
+            spending_controls: { spending_limits: [{ amount: (limit || 100) * 100, interval: 'per_authorization' }] },
+            metadata: { merchant_lock: merchant || "General" }
         });
-        console.log(`[LOG] Stripe kartı oluştu: ${stripeCard.id}`);
 
-        // 3. KART DETAYLARINI AL
-        const cardDetails = await stripe.issuing.cards.retrieve(
-            stripeCard.id,
-            { expand: ['number', 'cvc'] }
-        );
-
-        // Stripe Test API bazen numarayı hemen vermezse fallback yapalım
+        const cardDetails = await stripe.issuing.cards.retrieve(stripeCard.id, { expand: ['number', 'cvc'] });
         const rawCardNumber = cardDetails.number || generateFakeCardNumber(); 
         const rawCVV = cardDetails.cvc || generateCVV();
         const expiry = `${stripeCard.exp_month}/${stripeCard.exp_year}`;
 
-        // 4. ŞİFRELE VE KAYDET
-        console.log("[LOG] Veritabanına kaydediliyor...");
         const encryptedCardNumber = encrypt(rawCardNumber);
         const encryptedCVV = encrypt(rawCVV);
 
@@ -162,33 +149,20 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
 
         if (dbError) throw new Error(dbError.message);
 
-        console.log("[LOG] İşlem BAŞARILI! Yanıt dönülüyor.");
-        
+        console.log("[BAŞARILI] Kart oluşturuldu ve veritabanına yazıldı.");
+
         res.json({
             message: "Kart Hazır",
-            card: { 
-                ...dbCard, 
-                card_number: rawCardNumber, 
-                cvv: rawCVV,
-                type: cardType 
-            },
-            identity: { 
-                full_name: generateFakeName(), 
-                email: generateGhostEmail("Ghost"), 
-                phone: "+905550000000" 
-            }
+            card: { ...dbCard, card_number: rawCardNumber, cvv: rawCVV, type: cardType },
+            identity: { full_name: generateFakeName(), email: generateGhostEmail("Ghost"), phone: "+905550000000" }
         });
 
     } catch (error: any) {
-        console.error("[KRİTİK HATA]:", error); // Render loglarında görünecek
-        res.status(500).json({ 
-            error: "Stripe İşlem Hatası", 
-            detail: error.message 
-        });
+        console.error("[KRİTİK STRIPE HATASI]:", error);
+        res.status(500).json({ error: "Stripe Hatası", detail: error.message });
     }
 });
 
-// KARTLARI GETİR
 app.get('/my-cards', requireAuth, async (req: AuthRequest, res: Response) => {
     const { data } = await supabase.from('virtual_cards').select('*').eq('user_id', req.user.id).order('created_at', { ascending: false });
     const decrypted = data?.map(c => {
@@ -198,6 +172,4 @@ app.get('/my-cards', requireAuth, async (req: AuthRequest, res: Response) => {
     res.json({ cards: decrypted });
 });
 
-app.listen(port, () => { console.log(`Server running on ${port}`); });
-
-
+app.listen(port, () => { console.log(`[BAŞLATILDI] Server port ${port} üzerinde çalışıyor...`); });
