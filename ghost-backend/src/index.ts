@@ -47,9 +47,9 @@ function generateFakeCardNumber() {
 }
 function generateCVV() { return Math.floor(Math.random() * (999 - 100 + 1) + 100).toString(); }
 function generateFakeName() { return "Hayalet Kullanıcı"; }
-function generateGhostEmail(prefix?: string) { 
-    const name = prefix ? prefix.replace(/\s+/g, '').toLowerCase() : 'ghost';
-    return `${name}.${Math.floor(Math.random() * 10000)}@mail.com`; 
+function generateGhostEmail(prefix?: string) {
+    const p = prefix ? `${prefix}.` : '';
+    return `${p}ghost.${Math.floor(Math.random() * 10000)}@mail.com`;
 }
 
 // --- MIDDLEWARE ---
@@ -123,8 +123,15 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
             cardholderId = existingHolders.data[0].id;
             console.log(`[STRIPE] Mevcut kullanıcı bulundu: ${cardholderId}`);
             
-            // KRİTİK DÜZELTME: Eski kullanıcının adresi bozuk olabilir, ZORLA GÜNCELLE!
+            // KRİTİK DÜZELTME: Eski kullanıcının KYC (Kimlik) bilgileri eksik olabilir.
+            // Adres, Doğum Tarihi ve İsim bilgilerini ZORLA GÜNCELLE!
             await stripe.issuing.cardholders.update(cardholderId, {
+                status: 'active',
+                individual: {
+                    first_name: 'Ghost',
+                    last_name: 'User',
+                    dob: { day: 1, month: 1, year: 1990 } // Zorunlu alan: Doğum Tarihi
+                },
                 billing: {
                     address: {
                         line1: '1234 Main St',
@@ -135,16 +142,21 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
                     },
                 }
             });
-            console.log(`[STRIPE] Kullanıcı adresi onarıldı/güncellendi.`);
+            console.log(`[STRIPE] Kullanıcı kimlik ve adres bilgileri onarıldı.`);
 
         } else {
-            // 2. Yoksa Yeni Yarat
+            // 2. Yoksa Yeni Yarat (Tam KYC Bilgileriyle)
             console.log("[STRIPE] Yeni kullanıcı oluşturuluyor...");
             const newHolder = await stripe.issuing.cardholders.create({
                 name: 'Ghost User',
                 email: user.email,
                 status: 'active',
                 type: 'individual',
+                individual: {
+                    first_name: 'Ghost',
+                    last_name: 'User',
+                    dob: { day: 1, month: 1, year: 1990 } // Zorunlu alan
+                },
                 billing: {
                     address: { line1: '1234 Main St', city: 'San Francisco', state: 'CA', postal_code: '94111', country: 'US' },
                 },
