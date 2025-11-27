@@ -47,10 +47,7 @@ function generateFakeCardNumber() {
 }
 function generateCVV() { return Math.floor(Math.random() * (999 - 100 + 1) + 100).toString(); }
 function generateFakeName() { return "Hayalet Kullanıcı"; }
-function generateGhostEmail(prefix?: string) {
-    const p = prefix ? `${prefix}.` : '';
-    return `${p}ghost.${Math.floor(Math.random() * 10000)}@mail.com`;
-}
+function generateGhostEmail() { return `ghost.${Math.floor(Math.random()*10000)}@mail.com`; }
 
 // --- MIDDLEWARE ---
 const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -124,13 +121,15 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
             console.log(`[STRIPE] Mevcut kullanıcı bulundu: ${cardholderId}`);
             
             // KRİTİK DÜZELTME: Eski kullanıcının KYC (Kimlik) bilgileri eksik olabilir.
-            // Adres, Doğum Tarihi ve İsim bilgilerini ZORLA GÜNCELLE!
+            // Adres, Doğum Tarihi, İsim VE TELEFON bilgilerini ZORLA GÜNCELLE!
             await stripe.issuing.cardholders.update(cardholderId, {
                 status: 'active',
+                email: user.email,
+                phone_number: '+15555555555', // ZORUNLU ALAN: Telefon Numarası eklendi
                 individual: {
                     first_name: 'Ghost',
                     last_name: 'User',
-                    dob: { day: 1, month: 1, year: 1990 } // Zorunlu alan: Doğum Tarihi
+                    dob: { day: 1, month: 1, year: 1990 } 
                 },
                 billing: {
                     address: {
@@ -142,7 +141,7 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
                     },
                 }
             });
-            console.log(`[STRIPE] Kullanıcı kimlik ve adres bilgileri onarıldı.`);
+            console.log(`[STRIPE] Kullanıcı kimlik, adres ve telefon bilgileri onarıldı.`);
 
         } else {
             // 2. Yoksa Yeni Yarat (Tam KYC Bilgileriyle)
@@ -150,12 +149,13 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
             const newHolder = await stripe.issuing.cardholders.create({
                 name: 'Ghost User',
                 email: user.email,
+                phone_number: '+15555555555', // ZORUNLU ALAN: Telefon Numarası eklendi
                 status: 'active',
                 type: 'individual',
                 individual: {
                     first_name: 'Ghost',
                     last_name: 'User',
-                    dob: { day: 1, month: 1, year: 1990 } // Zorunlu alan
+                    dob: { day: 1, month: 1, year: 1990 } 
                 },
                 billing: {
                     address: { line1: '1234 Main St', city: 'San Francisco', state: 'CA', postal_code: '94111', country: 'US' },
@@ -207,7 +207,7 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
         res.json({
             message: "Kart Hazır",
             card: { ...dbCard, card_number: rawCardNumber, cvv: rawCVV, type: cardType },
-            identity: { full_name: generateFakeName(), email: generateGhostEmail("Ghost"), phone: "+905550000000" }
+            identity: { full_name: generateFakeName(), email: generateGhostEmail(), phone: "+905550000000" }
         });
 
     } catch (error: any) {
