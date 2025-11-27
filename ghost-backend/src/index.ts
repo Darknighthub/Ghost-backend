@@ -11,8 +11,9 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 // STRIPE AYARI
+// API Sürümü güncellendi: 2025.11.17.clover
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
-    apiVersion: '2025-11-17.clover',
+    apiVersion: '2025-11-17.clover' as any, // TypeScript hatasını önlemek için 'as any' eklendi
 });
 
 // Webhook için
@@ -29,8 +30,14 @@ app.use((req, res, next) => {
 
 interface AuthRequest extends Request { user?: any; }
 
-// --- YASAKLI KATEGORİLER ---
-const BLOCKED_CATEGORIES = ['7995', '5967', '7800']; // Kumar, +18 vs.
+// --- YASAKLI KATEGORİLER (DÜZELTİLDİ) ---
+// Stripe artık MCC numarası (7995) yerine bu isimleri (slug) kabul ediyor.
+const BLOCKED_CATEGORIES = [
+    'betting_casino_gambling', // Kumar ve Bahis
+    'dating_escort_services',  // +18 ve Eskort servisleri
+    'massage_parlors',         // Masaj salonları (Genelde riskli kategori)
+    'non_fi_money_orders'      // Para transferi (Kara para önleme)
+];
 
 // --- HELPERLAR ---
 function generateFakeCardNumber() {
@@ -40,7 +47,10 @@ function generateFakeCardNumber() {
 }
 function generateCVV() { return Math.floor(Math.random() * (999 - 100 + 1) + 100).toString(); }
 function generateFakeName() { return "Hayalet Kullanıcı"; }
-function generateGhostEmail(prefix?: string) { return `${prefix || 'ghost'}.${Math.floor(Math.random()*10000)}@mail.com`; }
+function generateGhostEmail(prefix?: string) { 
+    const name = prefix ? prefix.replace(/\s+/g, '').toLowerCase() : 'ghost';
+    return `${name}.${Math.floor(Math.random() * 10000)}@mail.com`; 
+}
 
 // --- MIDDLEWARE ---
 const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -54,7 +64,7 @@ const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) 
 };
 
 // --- ENDPOINTLER ---
-app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (Auto-Fixer Active) 🔧'); });
+app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (Stripe Fixed & Updated) 🔧'); });
 
 // WEBHOOK
 app.post('/webhook', async (req, res) => {
@@ -114,7 +124,6 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
             console.log(`[STRIPE] Mevcut kullanıcı bulundu: ${cardholderId}`);
             
             // KRİTİK DÜZELTME: Eski kullanıcının adresi bozuk olabilir, ZORLA GÜNCELLE!
-            // Bu işlem "Adres Hatası"nı %100 çözer.
             await stripe.issuing.cardholders.update(cardholderId, {
                 billing: {
                     address: {
@@ -122,7 +131,7 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
                         city: 'San Francisco',
                         state: 'CA',
                         postal_code: '94111',
-                        country: 'US', // Garanti adres
+                        country: 'US', 
                     },
                 }
             });
@@ -143,7 +152,7 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
             cardholderId = newHolder.id;
         }
 
-        // 3. Kartı Yarat
+        // 3. Kartı Yarat (Yasaklı kategoriler düzeltildi)
         const stripeCard = await stripe.issuing.cards.create({
             cardholder: cardholderId,
             currency: 'usd',
@@ -151,7 +160,7 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
             status: 'active',
             spending_controls: {
                 spending_limits: [{ amount: (limit || 100) * 100, interval: 'per_authorization' }],
-                blocked_categories: BLOCKED_CATEGORIES as unknown as Stripe.Issuing.CardCreateParams.SpendingControls.BlockedCategory[],
+                blocked_categories: BLOCKED_CATEGORIES as any, // TypeScript uyarısını geçmek için
             },
             metadata: {
                 merchant_lock: merchant || "General",
@@ -186,12 +195,11 @@ app.post('/create-card', requireAuth, async (req: AuthRequest, res: Response) =>
         res.json({
             message: "Kart Hazır",
             card: { ...dbCard, card_number: rawCardNumber, cvv: rawCVV, type: cardType },
-            identity: { full_name: generateFakeName(), email: generateGhostEmail(), phone: "+905550000000" }
+            identity: { full_name: generateFakeName(), email: generateGhostEmail("Ghost"), phone: "+905550000000" }
         });
 
     } catch (error: any) {
         console.error("[KRİTİK HATA]:", error);
-        // Hatanın ne olduğunu görmek için detayı dönüyoruz
         res.status(500).json({ error: "Kart Oluşturulamadı", detail: error.message || error.raw?.message });
     }
 });
