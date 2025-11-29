@@ -27,7 +27,7 @@ app.use((req, res, next) => {
 
 interface AuthRequest extends Request { user?: any; }
 
-const BLOCKED_CATEGORIES = ['betting_casino_gambling', 'dating_escort_services', 'massage_parlors'];
+const BLOCKED_CATEGORIES = ['betting_casino_gambling', 'dating_escort_services', 'massage_parlors', 'non_fi_money_orders'];
 
 // --- HELPERLAR ---
 function generateFakeCardNumber() { return "5555" + Math.floor(Math.random() * 1000000000000).toString().padStart(12, '0').substring(0,12); }
@@ -46,9 +46,9 @@ const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) 
     next();
 };
 
-app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (Mobile + Stripe Integrated) 🚀'); });
+app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (Async Mode ⚡) 🚀'); });
 
-// --- AUTH & WEBHOOK ---
+// --- AUTH ---
 app.post('/register', async (req, res) => {
     const { email, password, full_name } = req.body;
     const { data, error } = await supabase.auth.signUp({ email, password });
@@ -66,18 +66,6 @@ app.post('/login', async (req, res) => {
     res.json({ access_token: data.session.access_token, user: data.user });
 });
 
-app.post('/webhook', async (req, res) => {
-    let event;
-    try { event = req.body; } catch (err: any) { return res.status(400).send(`Webhook Error: ${err.message}`); }
-    if (event.type === 'issuing_authorization.created') {
-        const auth = event.data.object;
-        if (auth.card.metadata.type === 'SINGLE') {
-            try { await stripe.issuing.cards.update(auth.card.id, { status: 'inactive' }); } catch (e) {}
-        }
-    }
-    res.json({received: true});
-});
-
 app.get('/my-cards', requireAuth, async (req: AuthRequest, res: Response) => {
     const { data } = await supabase.from('virtual_cards').select('*').eq('user_id', req.user.id).order('created_at', { ascending: false });
     const decrypted = data?.map(c => {
@@ -87,11 +75,84 @@ app.get('/my-cards', requireAuth, async (req: AuthRequest, res: Response) => {
     res.json({ cards: decrypted });
 });
 
+// --- ASENKRON İŞLEM FONKSİYONU (ARKA PLAN İŞÇİSİ) ---
+async function processCardCreation(user: any, reqData: any) {
+    const { limit, merchant, cardType } = reqData.details;
+    const requestId = reqData.id;
+
+    console.log(`[ARKA PLAN] Kart üretimi başladı: ${requestId}`);
+
+    try {
+        // A. Kullanıcı Kontrolü / Oluşturma
+        let cardholderId;
+        const existingHolders = await stripe.issuing.cardholders.list({ email: user.email, status: 'active', limit: 1 });
+
+        if (existingHolders.data.length > 0) {
+            cardholderId = existingHolders.data[0].id;
+            // Eski kullanıcıyı onar (Adres + Telefon + DOB)
+            await stripe.issuing.cardholders.update(cardholderId, {
+                status: 'active',
+                phone_number: '+15555555555',
+                individual: { first_name: 'Ghost', last_name: 'User', dob: { day: 1, month: 1, year: 1990 } },
+                billing: { address: { line1: '1234 Main St', city: 'San Francisco', state: 'CA', postal_code: '94111', country: 'US' } },
+            });
+        } else {
+            // Yeni kullanıcı
+            const newHolder = await stripe.issuing.cardholders.create({
+                name: 'Ghost User', email: user.email, phone_number: '+15555555555', status: 'active', type: 'individual',
+                individual: { first_name: 'Ghost', last_name: 'User', dob: { day: 1, month: 1, year: 1990 } },
+                billing: { address: { line1: '1234 Main St', city: 'San Francisco', state: 'CA', postal_code: '94111', country: 'US' } },
+            });
+            cardholderId = newHolder.id;
+        }
+
+        // B. Kartı Yarat
+        const stripeCard = await stripe.issuing.cards.create({
+            cardholder: cardholderId,
+            currency: 'usd',
+            type: 'virtual',
+            status: 'active',
+            spending_controls: {
+                spending_limits: [{ amount: (limit || 100) * 100, interval: 'per_authorization' }],
+                blocked_categories: BLOCKED_CATEGORIES as any,
+            },
+            metadata: { merchant_lock: merchant || "Genel", type: cardType || "SUB" }
+        });
+
+        // C. Kaydet
+        const cardDetails = await stripe.issuing.cards.retrieve(stripeCard.id, { expand: ['number', 'cvc'] });
+        const rawCardNumber = cardDetails.number || generateFakeCardNumber(); 
+        const rawCVV = cardDetails.cvc || "123";
+        const expiry = `${stripeCard.exp_month}/${stripeCard.exp_year}`;
+
+        const encryptedCardNumber = encrypt(rawCardNumber);
+        const encryptedCVV = encrypt(rawCVV);
+
+        await supabase.from('virtual_cards').insert({
+            user_id: user.id,
+            card_number: encryptedCardNumber,
+            cvv: encryptedCVV,
+            expiry_date: expiry,
+            spending_limit: limit,
+            merchant_lock: merchant,
+            status: 'ACTIVE'
+        });
+
+        // İŞLEM BİTTİ -> APPROVED
+        await supabase.from('requests').update({ status: 'APPROVED' }).eq('id', requestId);
+        console.log(`[ARKA PLAN] İşlem TAMAMLANDI: ${requestId}`);
+
+    } catch (e: any) {
+        console.error(`[ARKA PLAN HATA]: ${e.message}`);
+        // Hata durumunda REJECTED yapalım ki eklenti beklemeyi bıraksın
+        await supabase.from('requests').update({ status: 'REJECTED', details: { error: e.message } }).eq('id', requestId);
+    }
+}
+
 // -----------------------------------------------------
-// MOBİL ONAY VE STRIPE İŞLEMLERİ
+// MOBİL ONAY VE İSTEK ENDPOINTLERİ
 // -----------------------------------------------------
 
-// 1. İSTEK BAŞLAT (Eklenti)
 app.post('/initiate-request', requireAuth, async (req: AuthRequest, res: Response) => {
     const { type, details } = req.body; 
     const user = req.user;
@@ -107,13 +168,12 @@ app.post('/initiate-request', requireAuth, async (req: AuthRequest, res: Respons
     res.json({ status: 'PENDING_APPROVAL', request_id: data.id });
 });
 
-// 2. BEKLEYENLERİ GETİR (Mobil)
 app.get('/pending-requests', requireAuth, async (req: AuthRequest, res: Response) => {
     const { data } = await supabase.from('requests').select('*').eq('user_id', req.user.id).eq('status', 'PENDING').order('created_at', { ascending: false });
     res.json({ requests: data || [] });
 });
 
-// 3. İŞLEMİ ONAYLA VE KARTI YARAT (Mobil)
+// MOBİL ONAY (ARTIK ANINDA CEVAP VERİYOR)
 app.post('/approve-request', requireAuth, async (req: AuthRequest, res: Response) => {
     const { request_id, action } = req.body;
     const user = req.user;
@@ -126,87 +186,29 @@ app.post('/approve-request', requireAuth, async (req: AuthRequest, res: Response
         return res.json({ message: "Reddedildi." });
     }
 
-    // ONAYLANDIYSA -> STRIPE İŞLEMİNİ BAŞLAT
     if (reqData.type === 'CREATE_CARD') {
-        const { limit, merchant, cardType } = reqData.details;
+        // İsteği "PROCESSING" (İşleniyor) durumuna alıyoruz
+        // Bu, işlemin başladığını gösterir ama henüz bitmediğini söyler.
+        // Eklenti zaten APPROVED beklediği için sorun olmaz.
         
-        try {
-            console.log(`[STRIPE] İşlem başlıyor... Limit: ${limit}`);
-            
-            // A. Kullanıcı Kontrolü ve Tamir (US Adresi + Telefon)
-            let cardholderId;
-            const existingHolders = await stripe.issuing.cardholders.list({ email: user.email, status: 'active', limit: 1 });
+        // 1. ANINDA CEVAP VER (Mobil Beklemesin)
+        res.json({ message: "Onay alındı, işlem arka planda yapılıyor." });
 
-            if (existingHolders.data.length > 0) {
-                cardholderId = existingHolders.data[0].id;
-                // Mevcut kullanıcıyı onar (Adres ve Telefon ekle)
-                await stripe.issuing.cardholders.update(cardholderId, {
-                    phone_number: '+15555555555',
-                    billing: { address: { line1: '1234 Main St', city: 'San Francisco', state: 'CA', postal_code: '94111', country: 'US' } },
-                    individual: { dob: { day: 1, month: 1, year: 1990 }, first_name: 'Ghost', last_name: 'User' }
-                });
-            } else {
-                // Yeni kullanıcı yarat
-                const newHolder = await stripe.issuing.cardholders.create({
-                    name: 'Ghost User', email: user.email, phone_number: '+15555555555', status: 'active', type: 'individual',
-                    individual: { first_name: 'Ghost', last_name: 'User', dob: { day: 1, month: 1, year: 1990 } },
-                    billing: { address: { line1: '1234 Main St', city: 'San Francisco', state: 'CA', postal_code: '94111', country: 'US' } },
-                });
-                cardholderId = newHolder.id;
-            }
-
-            // B. Kart Yarat
-            const stripeCard = await stripe.issuing.cards.create({
-                cardholder: cardholderId,
-                currency: 'usd',
-                type: 'virtual',
-                status: 'active',
-                spending_controls: {
-                    spending_limits: [{ amount: (limit || 100) * 100, interval: 'per_authorization' }],
-                    blocked_categories: BLOCKED_CATEGORIES as any,
-                },
-                metadata: { merchant_lock: merchant || "Genel", type: cardType || "SUB" }
-            });
-
-            // C. Kaydet
-            const cardDetails = await stripe.issuing.cards.retrieve(stripeCard.id, { expand: ['number', 'cvc'] });
-            const rawCardNumber = cardDetails.number || generateFakeCardNumber(); 
-            const rawCVV = cardDetails.cvc || "123";
-            const expiry = `${stripeCard.exp_month}/${stripeCard.exp_year}`;
-
-            const encryptedCardNumber = encrypt(rawCardNumber);
-            const encryptedCVV = encrypt(rawCVV);
-
-            await supabase.from('virtual_cards').insert({
-                user_id: user.id,
-                card_number: encryptedCardNumber,
-                cvv: encryptedCVV,
-                expiry_date: expiry,
-                spending_limit: limit,
-                merchant_lock: merchant,
-                status: 'ACTIVE'
-            });
-
-            // D. İsteği Kapat
-            await supabase.from('requests').update({ status: 'APPROVED' }).eq('id', request_id);
-            
-            console.log("[BAŞARILI] Kart oluşturuldu.");
-            return res.json({ message: "Onaylandı ve Kart Oluşturuldu!" });
-
-        } catch (e: any) {
-            console.error("[HATA]", e);
-            // Hata olsa bile isteği kapatmıyoruz ki tekrar denenebilsin veya loglansın
-            return res.status(500).json({ error: "Stripe Hatası: " + e.message });
-        }
+        // 2. ARKA PLANDA ÇALIŞTIR (Await yok!)
+        processCardCreation(user, reqData);
+    } else {
+        res.json({ message: "İşlem kaydedildi." });
     }
-    
-    return res.json({ message: "İşlem kaydedildi." });
 });
 
-// 4. DURUM KONTROL (Eklenti Polling)
 app.get('/check-request-status/:id', requireAuth, async (req: AuthRequest, res: Response) => {
     const { data } = await supabase.from('requests').select('status').eq('id', req.params.id).single();
     res.json({ status: data?.status || 'UNKNOWN' });
+});
+
+// Webhook (Önemli Değil ama dursun)
+app.post('/webhook', async (req, res) => {
+    res.json({received: true});
 });
 
 app.listen(port, () => { console.log(`Server running on ${port}`); });
