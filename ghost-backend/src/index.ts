@@ -4,8 +4,6 @@ import dotenv from 'dotenv';
 import Stripe from 'stripe'; 
 import { supabase } from './config/supabase';
 import { encrypt, decrypt } from './utils/crypto';
-import iyzipay from './utils/iyzico';
-import Iyzipay from 'iyzipay';
 
 dotenv.config();
 
@@ -37,6 +35,27 @@ function generateCVV() { return "123"; }
 function generateFakeName() { return "Hayalet Kullanıcı"; }
 function generateGhostEmail() { return `ghost.${Math.floor(Math.random()*10000)}@mail.com`; }
 
+// --- YENİ: EXPO PUSH BİLDİRİM FONKSİYONU ---
+async function sendPushNotification(expoPushToken: string, title: string, body: string) {
+    const message = {
+        to: expoPushToken,
+        sound: 'default',
+        title: title,
+        body: body,
+        data: { screen: 'Requests' }, // Bildirime tıklayınca açılacak ekran
+    };
+
+    await fetch('https://exp.host/--/api/v2/push/send', {
+        method: 'POST',
+        headers: {
+            Accept: 'application/json',
+            'Accept-encoding': 'gzip, deflate',
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(message),
+    });
+}
+
 // --- MIDDLEWARE ---
 const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) => {
     const authHeader = req.headers.authorization;
@@ -48,9 +67,9 @@ const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) 
     next();
 };
 
-app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (Source Cards Added 💳) 🚀'); });
+app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (Push Notifications 🔔) 🚀'); });
 
-// --- AUTH ---
+// --- AUTH & USER ---
 app.post('/register', async (req, res) => {
     const { email, password, full_name } = req.body;
     const { data, error } = await supabase.auth.signUp({ email, password });
@@ -68,6 +87,14 @@ app.post('/login', async (req, res) => {
     res.json({ access_token: data.session.access_token, user: data.user });
 });
 
+// YENİ: PUSH TOKEN KAYDETME
+app.post('/update-push-token', requireAuth, async (req: AuthRequest, res: Response) => {
+    const { pushToken } = req.body;
+    const { error } = await supabase.from('users').update({ push_token: pushToken }).eq('id', req.user.id);
+    if(error) return res.status(500).json({ error: error.message });
+    res.json({ message: "Bildirim ayarları güncellendi." });
+});
+
 app.get('/my-cards', requireAuth, async (req: AuthRequest, res: Response) => {
     const { data } = await supabase.from('virtual_cards').select('*').eq('user_id', req.user.id).order('created_at', { ascending: false });
     const decrypted = data?.map(c => {
@@ -77,54 +104,27 @@ app.get('/my-cards', requireAuth, async (req: AuthRequest, res: Response) => {
     res.json({ cards: decrypted });
 });
 
-// -----------------------------------------------------
-// YENİ: KAYNAK KART YÖNETİMİ (SOURCE CARDS)
-// -----------------------------------------------------
-
-// 1. KAYNAK KART EKLE
+// KAYNAK KARTLAR
 app.post('/add-source-card', requireAuth, async (req: AuthRequest, res: Response) => {
-    const { cardNumber, bankName, brand, expiry, cvv } = req.body;
-    const user = req.user;
-
-    // Güvenlik: Asla tam numarayı kaydetme! Sadece son 4 hane.
-    const last4 = cardNumber.slice(-4);
-
+    const { cardNumber, bankName, brand, expiry } = req.body;
     const { data, error } = await supabase.from('source_cards').insert({
-        user_id: user.id,
-        bank_name: bankName || "Bilinmeyen Banka",
-        brand: brand || "Visa",
-        last4: last4,
-        expiry_date: expiry || "12/34",
-        status: 'ACTIVE'
+        user_id: req.user.id, bank_name: bankName || "Banka", brand: brand || "Visa",
+        last4: cardNumber.slice(-4), expiry_date: expiry, status: 'ACTIVE'
     }).select().single();
-
     if (error) return res.status(500).json({ error: error.message });
-
-    res.json({ message: "Kaynak kart başarıyla eklendi!", card: data });
+    res.json({ message: "Eklendi", card: data });
 });
 
-// 2. KAYNAK KARTLARI LİSTELE
 app.get('/source-cards', requireAuth, async (req: AuthRequest, res: Response) => {
-    const { data, error } = await supabase
-        .from('source_cards')
-        .select('*')
-        .eq('user_id', req.user.id)
-        .order('created_at', { ascending: false });
-
-    if (error) return res.status(500).json({ error: error.message });
-    res.json({ cards: data });
+    const { data } = await supabase.from('source_cards').select('*').eq('user_id', req.user.id).order('created_at', { ascending: false });
+    res.json({ cards: data || [] });
 });
 
-// -----------------------------------------------------
-// ASENKRON İŞLEM & MOBİL ONAY
-// -----------------------------------------------------
+// --- İŞLEM AKIŞI ---
 
 async function processCardCreation(user: any, reqData: any) {
     const requestId = reqData.id;
-    if (!reqData || !reqData.details) {
-        await supabase.from('requests').update({ status: 'REJECTED', details: { error: "Eksik veri" } }).eq('id', requestId);
-        return; 
-    }
+    if (!reqData || !reqData.details) return; // Hata koruması
 
     const { limit, merchant, cardType } = reqData.details;
     const limitAmount = parseInt(limit) || 100;
@@ -136,29 +136,22 @@ async function processCardCreation(user: any, reqData: any) {
         if (existingHolders.data.length > 0) {
             cardholderId = existingHolders.data[0].id;
             await stripe.issuing.cardholders.update(cardholderId, {
-                status: 'active',
-                phone_number: '+15555555555',
+                status: 'active', phone_number: '+15555555555',
                 individual: { first_name: 'Ghost', last_name: 'User', dob: { day: 1, month: 1, year: 1990 } },
-                billing: { address: { line1: '1234 Main St', city: 'San Francisco', state: 'CA', postal_code: '94111', country: 'US' } },
+                billing: { address: { line1: '1234 Main St', city: 'SF', state: 'CA', postal_code: '94111', country: 'US' } },
             });
         } else {
             const newHolder = await stripe.issuing.cardholders.create({
                 name: 'Ghost User', email: user.email, phone_number: '+15555555555', status: 'active', type: 'individual',
                 individual: { first_name: 'Ghost', last_name: 'User', dob: { day: 1, month: 1, year: 1990 } },
-                billing: { address: { line1: '1234 Main St', city: 'San Francisco', state: 'CA', postal_code: '94111', country: 'US' } },
+                billing: { address: { line1: '1234 Main St', city: 'SF', state: 'CA', postal_code: '94111', country: 'US' } },
             });
             cardholderId = newHolder.id;
         }
 
         const stripeCard = await stripe.issuing.cards.create({
-            cardholder: cardholderId,
-            currency: 'usd',
-            type: 'virtual',
-            status: 'active',
-            spending_controls: {
-                spending_limits: [{ amount: limitAmount * 100, interval: 'per_authorization' }],
-                blocked_categories: BLOCKED_CATEGORIES as any,
-            },
+            cardholder: cardholderId, currency: 'usd', type: 'virtual', status: 'active',
+            spending_controls: { spending_limits: [{ amount: limitAmount * 100, interval: 'per_authorization' }], blocked_categories: BLOCKED_CATEGORIES as any },
             metadata: { merchant_lock: merchant, type: cardType }
         });
 
@@ -168,38 +161,45 @@ async function processCardCreation(user: any, reqData: any) {
         const expiry = `${stripeCard.exp_month}/${stripeCard.exp_year}`;
 
         await supabase.from('virtual_cards').insert({
-            user_id: user.id,
-            card_number: encrypt(rawCardNumber),
-            cvv: encrypt(rawCVV),
-            expiry_date: expiry,
-            spending_limit: limitAmount,
-            merchant_lock: merchant,
-            status: 'ACTIVE'
+            user_id: user.id, card_number: encrypt(rawCardNumber), cvv: encrypt(rawCVV),
+            expiry_date: expiry, spending_limit: limitAmount, merchant_lock: merchant, status: 'ACTIVE'
         });
 
         await supabase.from('requests').update({ status: 'APPROVED' }).eq('id', requestId);
+        
+        // BAŞARI BİLDİRİMİ (Opsiyonel: İşlem bitince de bildirim atabiliriz)
+        // await sendPushNotification(userToken, "İşlem Tamam!", "Kartınız oluşturuldu.");
 
     } catch (e: any) {
-        await supabase.from('requests').update({ 
-            status: 'REJECTED', 
-            details: { ...reqData.details, error: e.message } 
-        }).eq('id', requestId);
+        await supabase.from('requests').update({ status: 'REJECTED', details: { ...reqData.details, error: e.message } }).eq('id', requestId);
     }
 }
 
+// 1. İSTEK BAŞLAT (BİLDİRİM GÖNDEREN KISIM)
 app.post('/initiate-request', requireAuth, async (req: AuthRequest, res: Response) => {
     const { limit, merchant, cardType, type, details } = req.body; 
     const user = req.user;
     const requestDetails = details || { limit: limit || 100, merchant: merchant || "Genel", cardType: cardType || "SINGLE" };
 
     const { data, error } = await supabase.from('requests').insert({
-        user_id: user.id,
-        type: type || 'CREATE_CARD',
-        details: requestDetails,
-        status: 'PENDING'
+        user_id: user.id, type: type || 'CREATE_CARD', details: requestDetails, status: 'PENDING'
     }).select().single();
 
     if (error) return res.status(500).json({ error: error.message });
+
+    // --- BİLDİRİM GÖNDER ---
+    // Kullanıcının Push Token'ını al
+    const { data: userData } = await supabase.from('users').select('push_token').eq('id', user.id).single();
+    
+    if (userData?.push_token) {
+        console.log("Bildirim gönderiliyor:", userData.push_token);
+        await sendPushNotification(
+            userData.push_token,
+            "Onay Bekleniyor 🔔",
+            `${merchant} için ${requestDetails.limit} TL tutarında kart isteği var.`
+        );
+    }
+
     res.json({ status: 'PENDING_APPROVAL', request_id: data.id });
 });
 
@@ -225,89 +225,6 @@ app.post('/approve-request', requireAuth, async (req: AuthRequest, res: Response
     } else {
         res.json({ message: "İşlem kaydedildi." });
     }
-});
-app.post('/charge-source-card', requireAuth, async (req: AuthRequest, res: Response) => {
-    const { amount, cardId } = req.body; // cardId: Veritabanımızdaki kaynak kart ID'si
-    const user = req.user;
-
-    // 1. Kart bilgilerini veritabanından bul (Gerçekte Token kullanılır)
-    const { data: sourceCard } = await supabase
-        .from('source_cards')
-        .select('*')
-        .eq('id', cardId)
-        .single();
-
-    if (!sourceCard) return res.status(404).json({ error: "Kart bulunamadı" });
-
-    // 2. Iyzico İsteği Hazırla
-    const request = {
-        locale: Iyzipay.LOCALE.TR,
-        conversationId: '123456789',
-        price: amount.toString(),
-        paidPrice: amount.toString(),
-        currency: Iyzipay.CURRENCY.TRY,
-        installment: '1',
-        basketId: 'B67832',
-        paymentChannel: Iyzipay.PAYMENT_CHANNEL.WEB,
-        paymentGroup: Iyzipay.PAYMENT_GROUP.PRODUCT,
-        paymentCard: {
-            cardHolderName: 'John Doe', // Gerçekte kullanıcıdan alınır
-            cardNumber: '...', // Gerçekte Client tarafında tokenize edilir, buraya gelmez!
-            expireMonth: '12',
-            expireYear: '2030',
-            cvc: '123',
-            registerCard: '0'
-        },
-        buyer: {
-            id: user.id,
-            name: 'Ghost',
-            surname: 'User',
-            gsmNumber: '+905350000000',
-            email: user.email,
-            identityNumber: '74300864791',
-            lastLoginDate: '2015-10-05 12:43:35',
-            registrationDate: '2013-04-21 15:12:09',
-            registrationAddress: 'Nidakule Göztepe, Merdivenköy Mah. Bora Sok. No:1',
-            ip: '85.34.78.112',
-            city: 'Istanbul',
-            country: 'Turkey',
-            zipCode: '34732'
-        },
-        shippingAddress: {
-            contactName: 'Jane Doe',
-            city: 'Istanbul',
-            country: 'Turkey',
-            address: 'Nidakule Göztepe, Merdivenköy Mah. Bora Sok. No:1',
-            zipCode: '34742'
-        },
-        billingAddress: {
-            contactName: 'Jane Doe',
-            city: 'Istanbul',
-            country: 'Turkey',
-            address: 'Nidakule Göztepe, Merdivenköy Mah. Bora Sok. No:1',
-            zipCode: '34742'
-        },
-        basketItems: [
-            {
-                id: 'BI101',
-                name: 'Ghost Wallet TopUp',
-                category1: 'Finance',
-                itemType: Iyzipay.BASKET_ITEM_TYPE.VIRTUAL,
-                price: amount.toString()
-            }
-        ]
-    };
-
-    // 3. İsteği Gönder (Şimdilik Mock/Simülasyon yapıyoruz çünkü gerçek kart no yok)
-    // iyzipay.payment.create(request, function (err: any, result: any) {
-    //     if(err || result.status !== 'success') {
-    //         return res.status(400).json({ error: "Ödeme başarısız" });
-    //     }
-    //     res.json({ message: "Ödeme Başarılı!", result });
-    // });
-
-    // SİMÜLASYON CEVABI
-    res.json({ message: `Iyzico üzerinden ${amount} TL çekim simüle edildi.`, status: "SUCCESS" });
 });
 
 app.get('/check-request-status/:id', requireAuth, async (req: AuthRequest, res: Response) => {
