@@ -4,6 +4,8 @@ import dotenv from 'dotenv';
 import Stripe from 'stripe'; 
 import { supabase } from './config/supabase';
 import { encrypt, decrypt } from './utils/crypto';
+import iyzipay from './utils/iyzico';
+import Iyzipay from 'iyzipay';
 
 dotenv.config();
 
@@ -223,6 +225,89 @@ app.post('/approve-request', requireAuth, async (req: AuthRequest, res: Response
     } else {
         res.json({ message: "İşlem kaydedildi." });
     }
+});
+app.post('/charge-source-card', requireAuth, async (req: AuthRequest, res: Response) => {
+    const { amount, cardId } = req.body; // cardId: Veritabanımızdaki kaynak kart ID'si
+    const user = req.user;
+
+    // 1. Kart bilgilerini veritabanından bul (Gerçekte Token kullanılır)
+    const { data: sourceCard } = await supabase
+        .from('source_cards')
+        .select('*')
+        .eq('id', cardId)
+        .single();
+
+    if (!sourceCard) return res.status(404).json({ error: "Kart bulunamadı" });
+
+    // 2. Iyzico İsteği Hazırla
+    const request = {
+        locale: Iyzipay.LOCALE.TR,
+        conversationId: '123456789',
+        price: amount.toString(),
+        paidPrice: amount.toString(),
+        currency: Iyzipay.CURRENCY.TRY,
+        installment: '1',
+        basketId: 'B67832',
+        paymentChannel: Iyzipay.PAYMENT_CHANNEL.WEB,
+        paymentGroup: Iyzipay.PAYMENT_GROUP.PRODUCT,
+        paymentCard: {
+            cardHolderName: 'John Doe', // Gerçekte kullanıcıdan alınır
+            cardNumber: '...', // Gerçekte Client tarafında tokenize edilir, buraya gelmez!
+            expireMonth: '12',
+            expireYear: '2030',
+            cvc: '123',
+            registerCard: '0'
+        },
+        buyer: {
+            id: user.id,
+            name: 'Ghost',
+            surname: 'User',
+            gsmNumber: '+905350000000',
+            email: user.email,
+            identityNumber: '74300864791',
+            lastLoginDate: '2015-10-05 12:43:35',
+            registrationDate: '2013-04-21 15:12:09',
+            registrationAddress: 'Nidakule Göztepe, Merdivenköy Mah. Bora Sok. No:1',
+            ip: '85.34.78.112',
+            city: 'Istanbul',
+            country: 'Turkey',
+            zipCode: '34732'
+        },
+        shippingAddress: {
+            contactName: 'Jane Doe',
+            city: 'Istanbul',
+            country: 'Turkey',
+            address: 'Nidakule Göztepe, Merdivenköy Mah. Bora Sok. No:1',
+            zipCode: '34742'
+        },
+        billingAddress: {
+            contactName: 'Jane Doe',
+            city: 'Istanbul',
+            country: 'Turkey',
+            address: 'Nidakule Göztepe, Merdivenköy Mah. Bora Sok. No:1',
+            zipCode: '34742'
+        },
+        basketItems: [
+            {
+                id: 'BI101',
+                name: 'Ghost Wallet TopUp',
+                category1: 'Finance',
+                itemType: Iyzipay.BASKET_ITEM_TYPE.VIRTUAL,
+                price: amount.toString()
+            }
+        ]
+    };
+
+    // 3. İsteği Gönder (Şimdilik Mock/Simülasyon yapıyoruz çünkü gerçek kart no yok)
+    // iyzipay.payment.create(request, function (err: any, result: any) {
+    //     if(err || result.status !== 'success') {
+    //         return res.status(400).json({ error: "Ödeme başarısız" });
+    //     }
+    //     res.json({ message: "Ödeme Başarılı!", result });
+    // });
+
+    // SİMÜLASYON CEVABI
+    res.json({ message: `Iyzico üzerinden ${amount} TL çekim simüle edildi.`, status: "SUCCESS" });
 });
 
 app.get('/check-request-status/:id', requireAuth, async (req: AuthRequest, res: Response) => {
