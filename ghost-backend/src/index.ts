@@ -46,7 +46,7 @@ const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) 
     next();
 };
 
-app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (Async Mode ⚡) 🚀'); });
+app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (Crash Fix 🛡️) 🚀'); });
 
 // --- AUTH ---
 app.post('/register', async (req, res) => {
@@ -75,21 +75,27 @@ app.get('/my-cards', requireAuth, async (req: AuthRequest, res: Response) => {
     res.json({ cards: decrypted });
 });
 
-// --- ASENKRON İŞLEM FONKSİYONU (ARKA PLAN İŞÇİSİ) ---
+// --- ASENKRON İŞLEM FONKSİYONU ---
 async function processCardCreation(user: any, reqData: any) {
-    const { limit, merchant, cardType } = reqData.details;
     const requestId = reqData.id;
 
+    // --- EMNİYET KEMERİ (NULL CHECK) ---
+    // Hata burada oluşuyordu: reqData.details NULL ise sunucu çöküyordu.
+    if (!reqData || !reqData.details) {
+        console.error(`[HATA] İstek detayları boş! ID: ${requestId}`);
+        await supabase.from('requests').update({ status: 'REJECTED', details: { error: "Eksik veri" } }).eq('id', requestId);
+        return; // İşlemi durdur, çökme!
+    }
+
+    const { limit, merchant, cardType } = reqData.details;
     console.log(`[ARKA PLAN] Kart üretimi başladı: ${requestId}`);
 
     try {
-        // A. Kullanıcı Kontrolü / Oluşturma
         let cardholderId;
         const existingHolders = await stripe.issuing.cardholders.list({ email: user.email, status: 'active', limit: 1 });
 
         if (existingHolders.data.length > 0) {
             cardholderId = existingHolders.data[0].id;
-            // Eski kullanıcıyı onar (Adres + Telefon + DOB)
             await stripe.issuing.cardholders.update(cardholderId, {
                 status: 'active',
                 phone_number: '+15555555555',
@@ -97,7 +103,6 @@ async function processCardCreation(user: any, reqData: any) {
                 billing: { address: { line1: '1234 Main St', city: 'San Francisco', state: 'CA', postal_code: '94111', country: 'US' } },
             });
         } else {
-            // Yeni kullanıcı
             const newHolder = await stripe.issuing.cardholders.create({
                 name: 'Ghost User', email: user.email, phone_number: '+15555555555', status: 'active', type: 'individual',
                 individual: { first_name: 'Ghost', last_name: 'User', dob: { day: 1, month: 1, year: 1990 } },
@@ -106,7 +111,6 @@ async function processCardCreation(user: any, reqData: any) {
             cardholderId = newHolder.id;
         }
 
-        // B. Kartı Yarat
         const stripeCard = await stripe.issuing.cards.create({
             cardholder: cardholderId,
             currency: 'usd',
@@ -119,7 +123,6 @@ async function processCardCreation(user: any, reqData: any) {
             metadata: { merchant_lock: merchant || "Genel", type: cardType || "SUB" }
         });
 
-        // C. Kaydet
         const cardDetails = await stripe.issuing.cards.retrieve(stripeCard.id, { expand: ['number', 'cvc'] });
         const rawCardNumber = cardDetails.number || generateFakeCardNumber(); 
         const rawCVV = cardDetails.cvc || "123";
@@ -138,20 +141,16 @@ async function processCardCreation(user: any, reqData: any) {
             status: 'ACTIVE'
         });
 
-        // İŞLEM BİTTİ -> APPROVED
         await supabase.from('requests').update({ status: 'APPROVED' }).eq('id', requestId);
         console.log(`[ARKA PLAN] İşlem TAMAMLANDI: ${requestId}`);
 
     } catch (e: any) {
         console.error(`[ARKA PLAN HATA]: ${e.message}`);
-        // Hata durumunda REJECTED yapalım ki eklenti beklemeyi bıraksın
         await supabase.from('requests').update({ status: 'REJECTED', details: { error: e.message } }).eq('id', requestId);
     }
 }
 
-// -----------------------------------------------------
-// MOBİL ONAY VE İSTEK ENDPOINTLERİ
-// -----------------------------------------------------
+// --- MOBİL ONAY ENDPOINTLERİ ---
 
 app.post('/initiate-request', requireAuth, async (req: AuthRequest, res: Response) => {
     const { type, details } = req.body; 
@@ -173,12 +172,13 @@ app.get('/pending-requests', requireAuth, async (req: AuthRequest, res: Response
     res.json({ requests: data || [] });
 });
 
-// MOBİL ONAY (ARTIK ANINDA CEVAP VERİYOR)
 app.post('/approve-request', requireAuth, async (req: AuthRequest, res: Response) => {
     const { request_id, action } = req.body;
     const user = req.user;
 
+    // Sadece gerekli alanları çek
     const { data: reqData } = await supabase.from('requests').select('*').eq('id', request_id).single();
+    
     if (!reqData) return res.status(404).json({ error: "İstek bulunamadı" });
 
     if (action === 'REJECT') {
@@ -187,14 +187,10 @@ app.post('/approve-request', requireAuth, async (req: AuthRequest, res: Response
     }
 
     if (reqData.type === 'CREATE_CARD') {
-        // İsteği "PROCESSING" (İşleniyor) durumuna alıyoruz
-        // Bu, işlemin başladığını gösterir ama henüz bitmediğini söyler.
-        // Eklenti zaten APPROVED beklediği için sorun olmaz.
-        
-        // 1. ANINDA CEVAP VER (Mobil Beklemesin)
+        // Hızlı cevap ver
         res.json({ message: "Onay alındı, işlem arka planda yapılıyor." });
-
-        // 2. ARKA PLANDA ÇALIŞTIR (Await yok!)
+        
+        // Arka planda çalıştır
         processCardCreation(user, reqData);
     } else {
         res.json({ message: "İşlem kaydedildi." });
@@ -206,9 +202,6 @@ app.get('/check-request-status/:id', requireAuth, async (req: AuthRequest, res: 
     res.json({ status: data?.status || 'UNKNOWN' });
 });
 
-// Webhook (Önemli Değil ama dursun)
-app.post('/webhook', async (req, res) => {
-    res.json({received: true});
-});
+app.post('/webhook', async (req, res) => { res.json({received: true}); });
 
 app.listen(port, () => { console.log(`Server running on ${port}`); });
