@@ -81,7 +81,7 @@ app.get('/my-cards', requireAuth, async (req: AuthRequest, res: Response) => {
 
 // 1. KAYNAK KART EKLE
 app.post('/add-source-card', requireAuth, async (req: AuthRequest, res: Response) => {
-    const { cardNumber, bankName, brand } = req.body;
+    const { cardNumber, bankName, brand, expiry, cvv } = req.body;
     const user = req.user;
 
     // Güvenlik: Asla tam numarayı kaydetme! Sadece son 4 hane.
@@ -92,6 +92,7 @@ app.post('/add-source-card', requireAuth, async (req: AuthRequest, res: Response
         bank_name: bankName || "Bilinmeyen Banka",
         brand: brand || "Visa",
         last4: last4,
+        expiry_date: expiry || "12/34",
         status: 'ACTIVE'
     }).select().single();
 
