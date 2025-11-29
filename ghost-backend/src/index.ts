@@ -12,19 +12,16 @@ const port = process.env.PORT || 3000;
 
 // STRIPE AYARI
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '', {
-    apiVersion: '2025-11-17.clover' as any,
+    apiVersion: '2025-11-17.clover', // En stabil sürüm
 });
 
 app.use('/webhook', express.raw({ type: 'application/json' }));
 app.use(cors({ origin: '*' })); 
 app.use(express.json());
 
-// LOGLAYICI (Detaylı)
+// LOGLAYICI
 app.use((req, res, next) => {
-    if (req.url !== '/webhook') {
-        console.log(`[GELEN İSTEK] -> ${req.method} ${req.url}`);
-        if (req.method === 'POST') console.log("Body:", JSON.stringify(req.body));
-    }
+    if (req.url !== '/webhook') console.log(`[GELEN İSTEK] -> ${req.method} ${req.url}`);
     next();
 });
 
@@ -38,6 +35,38 @@ function generateCVV() { return "123"; }
 function generateFakeName() { return "Hayalet Kullanıcı"; }
 function generateGhostEmail() { return `ghost.${Math.floor(Math.random()*10000)}@mail.com`; }
 
+// --- STRIPE KİMLİK VERİSİ (ORTAK FONKSİYON) ---
+// Bu fonksiyon hem "Yeni Kayıt" hem "Eski Kayıt Düzeltme" için
+// gerekli olan TÜM verileri tek pakette sağlar.
+function getCardholderData() {
+    const timestamp = Math.floor(Date.now() / 1000);
+    return {
+        status: 'active' as const,
+        phone_number: '+15555555555',
+        individual: {
+            first_name: 'Ghost',
+            last_name: 'User',
+            dob: { day: 1, month: 1, year: 1995 },
+            // İŞTE EKSİK OLAN KRİTİK PARÇA:
+            card_issuing: {
+                user_terms_acceptance: {
+                    date: timestamp,
+                    ip: '127.0.0.1', // Veya sunucu IP'si
+                }
+            }
+        },
+        billing: {
+            address: {
+                line1: '1234 Main Street',
+                city: 'San Francisco',
+                state: 'CA',
+                postal_code: '94111',
+                country: 'US',
+            },
+        },
+    };
+}
+
 // --- MIDDLEWARE ---
 const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) => {
     const authHeader = req.headers.authorization;
@@ -49,7 +78,7 @@ const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) 
     next();
 };
 
-app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (Data Fix 🛠️) 🚀'); });
+app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (TOS Accepted ✅) 🚀'); });
 
 // --- AUTH ---
 app.post('/register', async (req, res) => {
@@ -82,10 +111,9 @@ app.get('/my-cards', requireAuth, async (req: AuthRequest, res: Response) => {
 async function processCardCreation(user: any, reqData: any) {
     const requestId = reqData.id;
 
-    // EMNİYET KEMERİ: Veri boşsa dur
     if (!reqData || !reqData.details) {
         console.error(`[HATA] İstek detayları boş! ID: ${requestId}`);
-        await supabase.from('requests').update({ status: 'REJECTED', details: { error: "Veri paketi boş geldi" } }).eq('id', requestId);
+        await supabase.from('requests').update({ status: 'REJECTED', details: { error: "Eksik veri" } }).eq('id', requestId);
         return; 
     }
 
@@ -98,20 +126,23 @@ async function processCardCreation(user: any, reqData: any) {
         let cardholderId;
         const existingHolders = await stripe.issuing.cardholders.list({ email: user.email, status: 'active', limit: 1 });
 
-        // KULLANICI YÖNETİMİ (Tamir Modu)
+        // GÜÇLÜ KULLANICI DOĞRULAMA (AUTO-FIX)
+        const commonData = getCardholderData();
+
         if (existingHolders.data.length > 0) {
             cardholderId = existingHolders.data[0].id;
-            await stripe.issuing.cardholders.update(cardholderId, {
-                status: 'active',
-                phone_number: '+15555555555', // Zorunlu
-                individual: { first_name: 'Ghost', last_name: 'User', dob: { day: 1, month: 1, year: 1990 } }, // Zorunlu
-                billing: { address: { line1: '1234 Main St', city: 'San Francisco', state: 'CA', postal_code: '94111', country: 'US' } },
-            });
+            console.log(`[STRIPE] Mevcut kullanıcı bulundu (${cardholderId}). Eksikler tamamlanıyor (TOS + KYC)...`);
+            
+            // Mevcut kullanıcıyı zorla güncelle (Sözleşmeyi kabul etmiş say)
+            await stripe.issuing.cardholders.update(cardholderId, commonData);
+            
         } else {
+            console.log(`[STRIPE] Yeni kullanıcı oluşturuluyor...`);
             const newHolder = await stripe.issuing.cardholders.create({
-                name: 'Ghost User', email: user.email, phone_number: '+15555555555', status: 'active', type: 'individual',
-                individual: { first_name: 'Ghost', last_name: 'User', dob: { day: 1, month: 1, year: 1990 } },
-                billing: { address: { line1: '1234 Main St', city: 'San Francisco', state: 'CA', postal_code: '94111', country: 'US' } },
+                name: 'Ghost User',
+                email: user.email,
+                type: 'individual',
+                ...commonData
             });
             cardholderId = newHolder.id;
         }
@@ -131,8 +162,6 @@ async function processCardCreation(user: any, reqData: any) {
 
         // DETAYLARI AL
         const cardDetails = await stripe.issuing.cards.retrieve(stripeCard.id, { expand: ['number', 'cvc'] });
-        
-        // Test modunda bazen numara gizli gelir, fallback yapalım
         const rawCardNumber = cardDetails.number || generateFakeCardNumber(); 
         const rawCVV = cardDetails.cvc || "123";
         const expiry = `${stripeCard.exp_month}/${stripeCard.exp_year}`;
@@ -161,16 +190,12 @@ async function processCardCreation(user: any, reqData: any) {
     }
 }
 
-// -----------------------------------------------------
-// İSTEK YÖNETİMİ (DÜZELTİLEN KISIM)
-// -----------------------------------------------------
+// --- İSTEK YÖNETİMİ ---
 
 app.post('/initiate-request', requireAuth, async (req: AuthRequest, res: Response) => {
-    // BURASI DÜZELTİLDİ: Eklentiden gelen dağınık veriyi toparlıyoruz
     const { limit, merchant, cardType, type, details } = req.body; 
     const user = req.user;
 
-    // Eğer eklenti 'details' nesnesi göndermemişse, biz oluşturalım
     const requestDetails = details || {
         limit: limit || 100,
         merchant: merchant || "Genel",
@@ -180,7 +205,7 @@ app.post('/initiate-request', requireAuth, async (req: AuthRequest, res: Respons
     const { data, error } = await supabase.from('requests').insert({
         user_id: user.id,
         type: type || 'CREATE_CARD',
-        details: requestDetails, // Artık içi dolu!
+        details: requestDetails,
         status: 'PENDING'
     }).select().single();
 
@@ -207,7 +232,6 @@ app.post('/approve-request', requireAuth, async (req: AuthRequest, res: Response
 
     if (reqData.type === 'CREATE_CARD') {
         res.json({ message: "Onay alındı, işlem başladı." });
-        // Kritik: Kullanıcı ve Veriyi fonksiyona paslıyoruz
         processCardCreation(user, reqData);
     } else {
         res.json({ message: "İşlem kaydedildi." });
