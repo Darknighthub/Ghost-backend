@@ -46,7 +46,7 @@ const requireAuth = async (req: AuthRequest, res: Response, next: NextFunction) 
     next();
 };
 
-app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (Crash Fix 🛡️) 🚀'); });
+app.get('/', (req, res) => { res.send('Ghost Protocol vFinal (Type Safe 🛡️) 🚀'); });
 
 // --- AUTH ---
 app.post('/register', async (req, res) => {
@@ -75,20 +75,22 @@ app.get('/my-cards', requireAuth, async (req: AuthRequest, res: Response) => {
     res.json({ cards: decrypted });
 });
 
-// --- ASENKRON İŞLEM FONKSİYONU ---
+// --- ASENKRON İŞLEM (HATA DÜZELTİLDİ) ---
 async function processCardCreation(user: any, reqData: any) {
     const requestId = reqData.id;
 
-    // --- EMNİYET KEMERİ (NULL CHECK) ---
-    // Hata burada oluşuyordu: reqData.details NULL ise sunucu çöküyordu.
     if (!reqData || !reqData.details) {
         console.error(`[HATA] İstek detayları boş! ID: ${requestId}`);
         await supabase.from('requests').update({ status: 'REJECTED', details: { error: "Eksik veri" } }).eq('id', requestId);
-        return; // İşlemi durdur, çökme!
+        return; 
     }
 
-    const { limit, merchant, cardType } = reqData.details;
-    console.log(`[ARKA PLAN] Kart üretimi başladı: ${requestId}`);
+    // VERİ TİPİ DÖNÜŞÜMÜ (ÖNEMLİ!)
+    const limit = parseInt(reqData.details.limit) || 100; // Sayıya çevir
+    const merchant = String(reqData.details.merchant || "Genel"); // Yazıya çevir
+    const cardType = reqData.details.cardType || "SINGLE";
+
+    console.log(`[ARKA PLAN] Kart üretimi başladı: ${requestId}, Limit: ${limit}`);
 
     try {
         let cardholderId;
@@ -96,6 +98,7 @@ async function processCardCreation(user: any, reqData: any) {
 
         if (existingHolders.data.length > 0) {
             cardholderId = existingHolders.data[0].id;
+            // Eski kaydı onar
             await stripe.issuing.cardholders.update(cardholderId, {
                 status: 'active',
                 phone_number: '+15555555555',
@@ -103,6 +106,7 @@ async function processCardCreation(user: any, reqData: any) {
                 billing: { address: { line1: '1234 Main St', city: 'San Francisco', state: 'CA', postal_code: '94111', country: 'US' } },
             });
         } else {
+            // Yeni kayıt
             const newHolder = await stripe.issuing.cardholders.create({
                 name: 'Ghost User', email: user.email, phone_number: '+15555555555', status: 'active', type: 'individual',
                 individual: { first_name: 'Ghost', last_name: 'User', dob: { day: 1, month: 1, year: 1990 } },
@@ -117,10 +121,10 @@ async function processCardCreation(user: any, reqData: any) {
             type: 'virtual',
             status: 'active',
             spending_controls: {
-                spending_limits: [{ amount: (limit || 100) * 100, interval: 'per_authorization' }],
+                spending_limits: [{ amount: limit * 100, interval: 'per_authorization' }], // limit * 100
                 blocked_categories: BLOCKED_CATEGORIES as any,
             },
-            metadata: { merchant_lock: merchant || "Genel", type: cardType || "SUB" }
+            metadata: { merchant_lock: merchant, type: cardType }
         });
 
         const cardDetails = await stripe.issuing.cards.retrieve(stripeCard.id, { expand: ['number', 'cvc'] });
@@ -146,7 +150,11 @@ async function processCardCreation(user: any, reqData: any) {
 
     } catch (e: any) {
         console.error(`[ARKA PLAN HATA]: ${e.message}`);
-        await supabase.from('requests').update({ status: 'REJECTED', details: { error: e.message } }).eq('id', requestId);
+        // Hatayı DB'ye yaz ki görelim
+        await supabase.from('requests').update({ 
+            status: 'REJECTED', 
+            details: { ...reqData.details, error: e.message } // Eski detayı koru, hata ekle
+        }).eq('id', requestId);
     }
 }
 
@@ -176,7 +184,6 @@ app.post('/approve-request', requireAuth, async (req: AuthRequest, res: Response
     const { request_id, action } = req.body;
     const user = req.user;
 
-    // Sadece gerekli alanları çek
     const { data: reqData } = await supabase.from('requests').select('*').eq('id', request_id).single();
     
     if (!reqData) return res.status(404).json({ error: "İstek bulunamadı" });
@@ -187,10 +194,7 @@ app.post('/approve-request', requireAuth, async (req: AuthRequest, res: Response
     }
 
     if (reqData.type === 'CREATE_CARD') {
-        // Hızlı cevap ver
         res.json({ message: "Onay alındı, işlem arka planda yapılıyor." });
-        
-        // Arka planda çalıştır
         processCardCreation(user, reqData);
     } else {
         res.json({ message: "İşlem kaydedildi." });
